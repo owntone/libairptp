@@ -1,0 +1,4 @@
+TEST_CFLAGS = $(CFLAGS)
+TEST_LIBS = $(LIBS)
+
+AM_CPPFLAGS = -I$(top_srcdir)

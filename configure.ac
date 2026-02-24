@@ -16,5 +16,9 @@ AC_SUBST([AM_CPPFLAGS])
 AC_CHECK_HEADERS([endian.h sys/endian.h libkern/OSByteOrder.h], [found_endian_headers=yes; break;])
 AS_IF([test "x$found_endian_headers" != "xyes"], [AC_MSG_ERROR([[Missing functions to swap byte order]])])
 
+AC_SEARCH_LIBS([pthread_exit], [pthread], [], [AC_MSG_ERROR([[pthreads library is required]])])
+
+PKG_CHECK_MODULES([LIBEVENT], [libevent])
+
 AC_CONFIG_FILES([Makefile tests/Makefile])
 AC_OUTPUT

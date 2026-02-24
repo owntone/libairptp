@@ -1,24 +1,43 @@
-#ifndef __PTPD_H__
-#define __PTPD_H__
+#ifndef __AIRPTP_H__
+#define __AIRPTP_H__
 
-uint64_t
-ptpd_clock_id_get(void);
+#include <inttypes.h>
 
+struct airptp_handle;
+
+struct airptp_callbacks
+{
+  // Optional - set name of thread
+  void (*thread_name_set)(const char *name);
+
+  // Debugging
+  void (*hexdump)(const char *msg, uint8_t *data, size_t data_len);
+  void (*logmsg)(const char *fmt, ...);
+};
+
+// Returns a handle if it was possible to bind to port 319 and 320. This
+// normally requires root privilies.
+struct airptp_handle *
+airptp_daemon_bind(void);
+
+// Starts a PTP daemon. Ports must have been bound already. Starting the daemon
+// does not require privileges.
 int
-ptpd_slave_add(uint32_t *slave_id, const char *addr);
+airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_shared, struct airptp_callbacks *cb);
+
+// Returns a handle if the host is running a compatible airptp daemon.
+struct airptp_handle *
+airptp_daemon_find(void);
 
 void
-ptpd_slave_remove(uint32_t slave_id);
+airptp_free(struct airptp_handle *hdl);
 
-// Binds priviliged ports 319 and 320, so must be called before the server drops
-// priviliges
-int
-ptpd_bind(void);
+// exit_cb?
 
 int
-ptpd_init(uint64_t clock_id_seed);
+airptp_clock_id_get(uint64_t *clock_id, struct airptp_handle *hdl);
 
-void
-ptpd_deinit(void);
+const char *
+airptp_last_errmsg(void);
 
-#endif /* !__PTPD_H__ */
+#endif // __AIRPTP_H__

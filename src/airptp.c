@@ -37,27 +37,67 @@ SOFTWARE.
 #include "airptp_internal.h"
 #include "ptp_definitions.h"
 #include "daemon.h"
+#include "ptp_msg_handle.h"
 
 
 /* -------------------------------- Globals --------------------------------- */
 
-// Shared
-const char *airptp_errmsg;
+unsigned short airptp_event_port = PTP_EVENT_PORT;
+unsigned short airptp_general_port = PTP_GENERAL_PORT;
 
+struct airptp_callbacks __thread airptp_cb;
+const char __thread *airptp_errmsg;
 
-/* -------------------------------- Helpers --------------------------------- */
+void
+airptp_hexdump(const char *msg, void *data, size_t data_len)
+{
+  if (!airptp_cb.hexdump)
+    return;
 
-static void dummy_thread_name_set(const char *name) { return; }
-static void dummy_hexdump(const char *msg, uint8_t *data, size_t data_len) { return; }
-static void dummy_logmsg(const char *fmt, ...) { return; }
+  airptp_cb.hexdump(msg, data, data_len);
+}
 
-static struct airptp_callbacks dummy_cb = {
-  .thread_name_set = dummy_thread_name_set,
-  .hexdump = dummy_hexdump,
-  .logmsg = dummy_logmsg,
-};
+void
+airptp_logmsg(const char *fmt, ...)
+{
+  va_list ap;
+  char content[2048];
+  int ret;
+
+  if (!airptp_cb.logmsg)
+    return;
+
+  va_start(ap, fmt);
+  ret = vsnprintf(content, sizeof(content), fmt, ap);
+  va_end(ap);
+
+  if (ret < 0)
+    airptp_cb.logmsg("[error printing log message]");
+  else
+    airptp_cb.logmsg("%s", content);
+}
+
+void
+airptp_thread_name_set(const char *name)
+{
+  if (!airptp_cb.thread_name_set)
+    return;
+
+  airptp_cb.thread_name_set(name);
+}
 
 /* ----------------------------------- API ---------------------------------- */
+
+void
+airptp_callbacks_register(struct airptp_callbacks *cb)
+{
+  if (cb->thread_name_set)
+    airptp_cb.thread_name_set = cb->thread_name_set;
+  if (cb->hexdump)
+    airptp_cb.hexdump = cb->hexdump;
+  if (cb->logmsg)
+    airptp_cb.logmsg = cb->logmsg;
+}
 
 struct airptp_handle *
 airptp_daemon_bind(void)
@@ -65,23 +105,24 @@ airptp_daemon_bind(void)
   struct airptp_handle *hdl = NULL;
   int fd_event = -1;
   int fd_general = -1;
+  int ret __attribute__((unused));
 
-  fd_event = net_bind(NULL, PTP_EVENT_PORT);
+  fd_event = utils_net_bind(NULL, airptp_event_port);
   if (fd_event < 0)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Could not bind to event port (usually 319)");
 
-  fd_general = net_bind(NULL, PTP_GENERAL_PORT);
+  fd_general = utils_net_bind(NULL, airptp_general_port);
   if (fd_general < 0)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Could not bind to general port (usually 320)");
 
   hdl = calloc(1, sizeof(struct airptp_handle));
   if (!hdl)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_OOM, "Out of memory");
 
-  hdl->daemon.event_svc.port = PTP_EVENT_PORT;
+  hdl->daemon.event_svc.port = airptp_event_port;
   hdl->daemon.event_svc.fd = fd_event;
 
-  hdl->daemon.general_svc.port = PTP_GENERAL_PORT;
+  hdl->daemon.general_svc.port = airptp_general_port;
   hdl->daemon.general_svc.fd = fd_general;
 
   hdl->state = AIRPTP_STATE_PORTS_BOUND;
@@ -101,15 +142,12 @@ airptp_daemon_bind(void)
 // Starts a PTP daemon. Ports must have been bound already. Starting the daemon
 // does not require privileges.
 int
-airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_shared, struct airptp_callbacks *cb)
+airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_shared)
 {
   int ret;
 
   if (!hdl->is_daemon || hdl->state != AIRPTP_STATE_PORTS_BOUND)
-    goto error;
-
-  if (!cb)
-    cb = &dummy_cb;
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Can't start daemon, ports not bound not in daemon mode");
 
   // From IEEE EUI-64 clockIdentity values: "The most significant 3 octets of
   // the clockIdentity shall be an OUI. The least significant two bits of the
@@ -122,9 +160,9 @@ airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_s
   // create a non-EUI-64 clock ID from 0xFFFF + 6 byte seed, ref 7.5.2.2.3.
   hdl->clock_id = clock_id_seed | 0xFFFF000000000000;
 
-  ret = daemon_start(&hdl->daemon, is_shared, hdl->clock_id, cb);
+  ret = daemon_start(&hdl->daemon, is_shared, hdl->clock_id, airptp_cb);
   if (ret < 0)
-    goto error;
+    goto error; // errmsg set by daemon_start
 
   hdl->state = AIRPTP_STATE_RUNNING;
 
@@ -141,25 +179,26 @@ airptp_daemon_find(void)
   struct airptp_shm_struct *daemon_info = MAP_FAILED;
   time_t now;
   int fd = -1;
+  int ret __attribute__((unused));
 
   fd = shm_open(AIRPTP_SHM_NAME, O_RDONLY, 0);
   if (fd < 0)
-    goto out;
+    RETURN_ERROR(AIRPTP_ERR_NOTFOUND, "No airptp daemon found");
 
   daemon_info = mmap(NULL, sizeof(struct airptp_shm_struct), PROT_READ, MAP_SHARED, fd, 0);
   if (daemon_info == MAP_FAILED)
-    goto out;
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "mmap() of shared memory returned an error");
 
   if (daemon_info->version_major != AIRPTP_SHM_STRUCTS_VERSION_MAJOR)
-    goto out;
+    RETURN_ERROR(AIRPTP_ERR_NOTFOUND, "The host is running an incompatible airptp daemon");
 
   now = time(NULL);
-  if (daemon_info->ts + AIRPTP_SHM_STALE_SECS < now)
-    goto out;
+  if (daemon_info->ts + AIRPTP_STALE_SECS < now)
+    RETURN_ERROR(AIRPTP_ERR_NOTFOUND, "No airptp daemon found (share mem is stale)");
 
   hdl = calloc(1, sizeof(struct airptp_handle));
   if (!hdl)
-    goto out;
+    RETURN_ERROR(AIRPTP_ERR_OOM, "Out of memory");
 
   hdl->clock_id = daemon_info->clock_id;
   hdl->state = AIRPTP_STATE_RUNNING;
@@ -170,7 +209,7 @@ airptp_daemon_find(void)
 
   return hdl;
 
- out:
+ error:
   free(hdl);
   if (daemon_info != MAP_FAILED)
     munmap(daemon_info, sizeof(struct airptp_shm_struct));
@@ -179,16 +218,60 @@ airptp_daemon_find(void)
   return NULL;
 }
 
-void
-airptp_free(struct airptp_handle *hdl)
+int
+airptp_peer_add(uint32_t *peer_id, const char *addr, struct airptp_handle *hdl)
 {
+  struct airptp_peer peer = { 0 };
+  int ret;
+
+  if (hdl->state != AIRPTP_STATE_RUNNING)
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Can't add peer, no airptp daemon");
+
+  if (utils_net_sockaddr_get(&peer.naddr, addr, 0) < 0)
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Can't add peer, address is invalid");
+
+  peer.id = utils_djb_hash(addr, strlen(addr));
+  peer.naddr_len = (peer.naddr.sa.sa_family == AF_INET6) ? sizeof(peer.naddr.sin6) : sizeof(peer.naddr.sin);
+
+  ret = ptp_msg_peer_add_send(&peer, hdl, airptp_general_port);
+  if (ret < 0)
+    RETURN_ERROR(AIRPTP_ERR_NOCONNECTION, "Can't add peer, connection to airptp daemon broken");
+
+  *peer_id = peer.id;
+
+  return 0;
+
+ error:
+  return -1;
+}
+
+void
+airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl)
+{
+  struct airptp_peer peer = { 0 };
+
+  peer.id = peer_id;
+
+  ptp_msg_peer_del_send(&peer, hdl, airptp_general_port);
+}
+
+int
+airptp_end(struct airptp_handle *hdl)
+{
+  int ret = 0;
+
   if (!hdl)
-    return;
+    return 0;
 
-  if (hdl->is_daemon)
-    daemon_stop(&hdl->daemon);
+  if (hdl->is_daemon) {
+    ret = daemon_stop(&hdl->daemon);
+    if (ret < 0)
+      goto error; // errmsg will be set by daemon_stop
+  }
 
+ error:
   free(hdl);
+  return (ret == 0) ? 0 : -1;
 }
 
 int
@@ -202,8 +285,14 @@ airptp_clock_id_get(uint64_t *clock_id, struct airptp_handle *hdl)
 }
 
 const char *
-airptp_last_errmsg(void)
+airptp_errmsg_get(void)
 {
-  return "NOT IMPL";
-//  return airptp_errmsg;
+  return airptp_errmsg;
+}
+
+void
+airptp_ports_override(unsigned short event_port, unsigned short general_port)
+{
+  airptp_event_port = event_port;
+  airptp_general_port = general_port;
 }

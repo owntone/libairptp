@@ -5,8 +5,7 @@
 #include <pthread.h>
 #include <inttypes.h>
 
-// FIXME TODO path
-#include "include/airptp.h"
+#include "airptp.h"
 #include "utils.h"
 
 #define AIRPTP_SHM_NAME "/airptp_shm"
@@ -14,14 +13,16 @@
 #define AIRPTP_SHM_STRUCTS_VERSION_MAJOR 0
 #define AIRPTP_SHM_STRUCTS_VERSION_MINOR 1
 
-// If the ts is older than 15 seconds we consider the daemon dead
-#define AIRPTP_SHM_STALE_SECS 15
+// If the ts is older than this we consider the daemon or peer gone
+#define AIRPTP_STALE_SECS 15
 
 #define AIRPTP_DOMAIN 0
-#define AIRPTP_MAX_SLAVES 32
+#define AIRPTP_MAX_PEERS 32
 
 #define RETURN_ERROR(r, m) \
   do { ret = (r); airptp_errmsg = (m); goto error; } while(0)
+
+extern const char __thread *airptp_errmsg;
 
 // The log2 of the announce message interval in seconds. The ATV uses -2, which
 // would be 0.25 sec, my amp uses 0, so 1 sec, as does nqptp.
@@ -40,6 +41,10 @@ enum airptp_error
 {
   AIRPTP_OK           = 0,
   AIRPTP_ERR_INVALID  = -1,
+  AIRPTP_ERR_NOCONNECTION = -2,
+  AIRPTP_ERR_NOTFOUND = -3,
+  AIRPTP_ERR_OOM = -4,
+  AIRPTP_ERR_INTERNAL = -5,
 };
 
 // TODO maybe not needed
@@ -65,14 +70,13 @@ struct airptp_service
   struct event *ev;
 };
 
-struct airptp_slave
+struct airptp_peer
 {
   uint32_t id;
-  union net_sockaddr naddr;
+  union utils_net_sockaddr naddr;
   socklen_t naddr_len;
-  char *str_addr; // Human readable for logging/debugging
   bool is_active;
-// TODO add last seen and prune if long ago
+  uint64_t last_seen;
 };
 
 struct airptp_daemon
@@ -86,8 +90,11 @@ struct airptp_daemon
   pthread_t tid;
   struct event_base *evbase;
 
+  pthread_mutex_t lock;
+  pthread_cond_t cond;
+
   int exit_pipe[2];
-  struct event *exit_ev;
+  struct event *start_stop_ev;
 
   struct airptp_service event_svc;
   struct airptp_service general_svc;
@@ -102,10 +109,10 @@ struct airptp_daemon
   uint16_t signaling_seq;
   uint16_t sync_seq;
 
-  struct airptp_callbacks *cb;
+  struct airptp_callbacks cb;
 
-  struct airptp_slave slaves[AIRPTP_MAX_SLAVES];
-  int num_slaves;
+  struct airptp_peer peers[AIRPTP_MAX_PEERS];
+  int num_peers;
 };
 
 struct airptp_handle
@@ -117,5 +124,14 @@ struct airptp_handle
 
   uint64_t clock_id;
 };
+
+void
+airptp_hexdump(const char *msg, void *data, size_t data_len);
+
+void
+airptp_logmsg(const char *fmt, ...);
+
+void
+airptp_thread_name_set(const char *name);
 
 #endif // __AIRPTP_INTERNAL_H__

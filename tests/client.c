@@ -68,40 +68,28 @@ main(int argc, char * argv[])
   airptp_ports_override(30319, 30320);
 
   hdl = airptp_daemon_find();
-  if (!hdl) {
-    printf("test1.c no running daemon found, will make one\n");
-    hdl = airptp_daemon_bind();
-    if (!hdl)
-      goto error;
-
-    ret = airptp_daemon_start(hdl, 1, true);
-    if (ret < 0)
-      goto error;
-  }
+  if (!hdl)
+    goto error;
 
   uint64_t clock_id;
   ret = airptp_clock_id_get(&clock_id, hdl);
   if (ret < 0)
     goto error;
 
-  printf("test1.c result clock_id=%" PRIx64 "\n", clock_id);
-
-  sleep(1);
+  printf("client.c found clock_id=%" PRIx64 "\n", clock_id);
 
   uint32_t peer_id;
-  ret = airptp_peer_add(&peer_id, "10.0.0.1", hdl);
+  ret = airptp_peer_add(&peer_id, "192.168.1.10", hdl);
   if (ret < 0)
     goto error;
 
-  printf("test1.c result peer_id=%" PRIu32 "\n", peer_id);
-
-  sleep(1);
+  printf("client.c added peer_id=%" PRIu32 "\n", peer_id);
 
   airptp_end(hdl);
 
   return 0;
 
  error:
-  printf("test1.c error: %s\n", airptp_errmsg_get());
+  printf("client.c error: %s\n", airptp_errmsg_get());
   return -1;
 }

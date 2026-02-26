@@ -40,8 +40,10 @@ SOFTWARE.
 
 #include "utils.h"
 
+extern struct airptp_callbacks __thread airptp_cb;
+
 int
-net_bind(const char *node, unsigned short port)
+utils_net_bind(const char *node, unsigned short port)
 {
   struct addrinfo hints = { 0 };
   struct addrinfo *servinfo;
@@ -112,14 +114,57 @@ net_bind(const char *node, unsigned short port)
   return -1;
 }
 
-void
-hexdump(const char *msg, uint8_t *data, size_t data_len)
+int
+utils_net_sockaddr_get(union utils_net_sockaddr *naddr, const char *addr, unsigned short port)
 {
-  return; //TODO
+  memset(naddr, 0, sizeof(union utils_net_sockaddr));
+
+  if (inet_pton(AF_INET, addr, &naddr->sin.sin_addr) == 1)
+    {
+      naddr->sin.sin_family = AF_INET;
+      naddr->sin.sin_port = htons(port);
+      return 0;
+    }
+
+  if (inet_pton(AF_INET6, addr, &naddr->sin6.sin6_addr) == 1)
+    {
+      naddr->sin6.sin6_family = AF_INET6;
+      naddr->sin6.sin6_port = htons(port);
+      return 0;
+    }
+
+  return -1;
 }
 
-void
-logmsg(const char *fmt, ...)
+int
+utils_net_address_get(char *addr, size_t addr_len, union utils_net_sockaddr *naddr)
 {
-  return; //TODO
+  const char *s = NULL;
+
+  memset(addr, 0, addr_len); // Just in case caller doesn't check for errors
+
+  if (naddr->sa.sa_family == AF_INET6)
+     s = inet_ntop(AF_INET6, &naddr->sin6.sin6_addr, addr, addr_len);
+  else if (naddr->sa.sa_family == AF_INET)
+     s = inet_ntop(AF_INET, &naddr->sin.sin_addr, addr, addr_len);
+
+  if (!s)
+    return -1;
+
+  return 0;
+}
+
+uint32_t
+utils_djb_hash(const void *data, size_t len)
+{
+  const unsigned char *bytes = data;
+  uint32_t hash = 5381;
+
+  while (len--)
+    {
+      hash = ((hash << 5) + hash) + *bytes;
+      bytes++;
+    }
+
+  return hash;
 }

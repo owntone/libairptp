@@ -33,15 +33,17 @@ SOFTWARE.
 
 #include "airptp_internal.h"
 #include "ptp_definitions.h"
+#include "daemon.h" // TODO get rid of?
 
 // Debugging
 #define AIRPTP_LOG_RECEIVED 0
 #define AIRPTP_LOG_SENT 0
 
-
 // Forward tlv handlers
-static int tlv_handle_org_subtype_generic(const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
-static int tlv_handle_org_subtype_message_internal(const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
+static int tlv_handle_org_subtype_generic(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
+static int tlv_handle_org_subtype_message_internal(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
+static int tlv_handle_org_subtype_peer_add(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
+static int tlv_handle_org_subtype_peer_del(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
 
 static struct ptp_tlv_org_subtype_map ptp_tlv_ieee_subtypes[] =
 {
@@ -56,10 +58,17 @@ static struct ptp_tlv_org_subtype_map ptp_tlv_apple_subtypes[] =
   { PTP_TLV_ORG_APPLE_UNKNOWN5, { 0x00, 0x00, 0x05 }, "Unknown subtype 5", tlv_handle_org_subtype_generic },
 };
 
+static struct ptp_tlv_org_subtype_map ptp_tlv_own_subtypes[] =
+{
+  { PTP_TLV_ORG_OWN_PEER_ADD, { 0x00, 0x00, 0x01 }, "Add peer", tlv_handle_org_subtype_peer_add },
+  { PTP_TLV_ORG_OWN_PEER_DEL, { 0x00, 0x00, 0x02 }, "Remove peer", tlv_handle_org_subtype_peer_del },
+};
+
 static struct ptp_tlv_org_map ptp_tlv_orgs[] =
 {
   { PTP_TLV_ORG_IEEE, { 0x00, 0x80, 0xc2 }, "IEEE 802.1 Chair", ptp_tlv_ieee_subtypes, ARRAY_SIZE(ptp_tlv_ieee_subtypes) },
   { PTP_TLV_ORG_APPLE, { 0x00, 0x0d, 0x93 }, "Apple, Inc", ptp_tlv_apple_subtypes, ARRAY_SIZE(ptp_tlv_apple_subtypes) },
+  { PTP_TLV_ORG_OWN, { 0x99, 0x99, 0x99 }, "OwnTone Ltd", ptp_tlv_own_subtypes, ARRAY_SIZE(ptp_tlv_own_subtypes) },
 };
 
 
@@ -113,7 +122,7 @@ port_id_htobe(uint8_t *out, uint8_t *in)
 }
 
 static void
-port_set(union net_sockaddr *naddr, unsigned short port)
+port_set(union utils_net_sockaddr *naddr, unsigned short port)
 {
   if (naddr->sa.sa_family == AF_INET6)
     naddr->sin6.sin6_port = htons(port);
@@ -135,7 +144,7 @@ log_received(const char *name, struct ptp_header *header, uint64_t clock_id, str
 
   int8_t logint = header->logMessageInterval;
 
-  logmsg("Received %s from clock %" PRIx64 ", logint=%" PRIi8 " with timestamp %" PRIu64 ".%" PRIu32 "\n", name, clock_id, logint, tv_sec, tv_nsec);
+  airptp_logmsg("Received %s from clock %" PRIx64 ", logint=%" PRIi8 " with timestamp %" PRIu64 ".%" PRIu32, name, clock_id, logint, tv_sec, tv_nsec);
 }
 #else
 static void
@@ -191,6 +200,9 @@ log_sent(uint8_t *msg, uint16_t port)
 	name = "PTP_MSGTYPE_ANNOUNCE";
 	bets = ((struct ptp_announce_message *)msg)->originTimestamp;
 	break;
+      case PTP_MSGTYPE_SIGNALING:
+	name = "PTP_MSGTYPE_SIGNALING";
+	break;
       default:
 	name = "unknown";
     }
@@ -204,7 +216,7 @@ log_sent(uint8_t *msg, uint16_t port)
   memcpy(&be64, ((struct ptp_header *)msg)->sourcePortIdentity, sizeof(be64));
   clock_id = be64toh(be64);
 
-  logmsg("Sent %s to port %hu, clock_id=%" PRIx64 ", ts=%" PRIu64 ".%" PRIu32 "\n", name, port, clock_id, tv_sec, tv_nsec);
+  airptp_logmsg("Sent %s to port %hu, clock_id=%" PRIx64 ", ts=%" PRIu64 ".%" PRIu32, name, port, clock_id, tv_sec, tv_nsec);
 }
 #else
 static void
@@ -451,11 +463,58 @@ msg_pdelay_resp_follow_up_make(struct ptp_pdelay_resp_follow_up_message *msg,
   port_id_htobe(msg->requestingPortIdentity, req_header->sourcePortIdentity);
 }
 
+static void
+msg_peer_add_make(struct ptp_peer_signaling_message *msg, struct airptp_peer *peer, uint64_t clock_id)
+{
+  uint8_t peerinfo[sizeof(msg->tlv_peer_info) - 4] = { 0 };
+  uint32_t be32_peer_id = htobe32(peer->id);
+  uint8_t addr_len = peer->naddr_len;
+  uint8_t *ptr;
+
+  header_init(&msg->header, PTP_MSGTYPE_SIGNALING, sizeof(struct ptp_peer_signaling_message), clock_id, 0, 0, PTP_FLAG_UNICAST);
+
+  memset(msg->targetPortIdentity, 0, PTP_PORT_ID_SIZE);
+
+  assert(addr_len <= 28); // sizeof(struct sockaddr_in6)
+
+  ptr = peerinfo;
+  memcpy(ptr, ptp_tlv_orgs[PTP_TLV_ORG_OWN].code, PTP_TLV_ORG_CODE_SIZE);
+  ptr += PTP_TLV_ORG_CODE_SIZE; // 3
+  memcpy(ptr, ptp_tlv_own_subtypes[PTP_TLV_ORG_OWN_PEER_ADD].code, PTP_TLV_ORG_CODE_SIZE);  // Add
+  ptr += PTP_TLV_ORG_CODE_SIZE; // 3
+  memcpy(ptr, &be32_peer_id, sizeof(be32_peer_id));
+  ptr += sizeof(be32_peer_id); // 4
+  memcpy(ptr, &addr_len, sizeof(addr_len));
+  ptr += sizeof(addr_len); // 1
+  memcpy(ptr, &peer->naddr, addr_len);
+  msg_tlv_write(msg->tlv_peer_info, sizeof(msg->tlv_peer_info), PTP_TLV_ORG_EXTENSION, sizeof(peerinfo), peerinfo);
+}
+
+static void
+msg_peer_del_make(struct ptp_peer_signaling_message *msg, struct airptp_peer *peer, uint64_t clock_id)
+{
+  uint8_t peerinfo[sizeof(msg->tlv_peer_info) - 4] = { 0 };
+  uint32_t be32_peer_id = htobe32(peer->id);
+  uint8_t *ptr;
+
+  header_init(&msg->header, PTP_MSGTYPE_SIGNALING, sizeof(struct ptp_peer_signaling_message), clock_id, 0, 0, PTP_FLAG_UNICAST);
+
+  memset(msg->targetPortIdentity, 0, PTP_PORT_ID_SIZE);
+
+  ptr = peerinfo;
+  memcpy(ptr, ptp_tlv_orgs[PTP_TLV_ORG_OWN].code, PTP_TLV_ORG_CODE_SIZE);
+  ptr += PTP_TLV_ORG_CODE_SIZE; // 3
+  memcpy(ptr, ptp_tlv_own_subtypes[PTP_TLV_ORG_OWN_PEER_DEL].code, PTP_TLV_ORG_CODE_SIZE); // Delete
+  ptr += PTP_TLV_ORG_CODE_SIZE; // 3
+  memcpy(ptr, &be32_peer_id, sizeof(be32_peer_id));
+  msg_tlv_write(msg->tlv_peer_info, sizeof(msg->tlv_peer_info), PTP_TLV_ORG_EXTENSION, sizeof(peerinfo), peerinfo);
+}
+
 
 /* ======================== Incoming message handling ======================= */
 
 static void
-sync_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+sync_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
   struct ptp_sync_message *in = (struct ptp_sync_message *)req;
   struct ptp_sync_message sync = { 0 };
@@ -471,7 +530,7 @@ sync_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union n
 }
 
 static void
-follow_up_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+follow_up_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
   struct ptp_follow_up_message *in = (struct ptp_follow_up_message *)req;
   struct ptp_follow_up_message follow_up = { 0 };
@@ -487,7 +546,7 @@ follow_up_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, un
 }
 
 static void
-delay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+delay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
   struct ptp_delay_req_message *in = (struct ptp_delay_req_message *)req;
   struct ptp_delay_req_message delay_req = { 0 };
@@ -507,19 +566,19 @@ delay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, un
   ts = current_time_get();
   msg_delay_resp_make(&delay_resp, daemon->clock_id, delay_req.header.sequenceId, &delay_req.header, ts);
 
-  port_set(peer_addr, PTP_GENERAL_PORT);
+  port_set(peer_addr, daemon->general_svc.port);
   len = sendto(daemon->general_svc.fd, &delay_resp, sizeof(delay_resp), 0, &peer_addr->sa, peer_addr_len);
   if (len != sizeof(delay_resp))
-    logmsg("Incomplete send of struct ptp_pdelay_resp_follow_up_message\n");
+    airptp_logmsg("Incomplete send of struct ptp_pdelay_resp_follow_up_message");
 
-  log_sent((uint8_t *)&delay_resp, PTP_GENERAL_PORT);
+  log_sent((uint8_t *)&delay_resp, daemon->general_svc.port);
 }
 
 // Since we are announcing ourselves as a very precise clock we always expect to
 // become master clock. Given that assumption holds true, we can just ignore
 // other announcements.
 static void
-announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
 #if AIRPTP_LOG_RECEIVED
   struct ptp_announce_message *in = (struct ptp_announce_message *)req;
@@ -567,7 +626,7 @@ announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, uni
 
   int8_t logint = announce.header.logMessageInterval;
 
-  logmsg("Recevied Announce message from %" PRIx64 ", gm %" PRIx64 ", p1=%u p2=%u, src=%s, class=%u (%s), acc=0x%02X, logint=%" PRIi8 "\n",
+  airptp_logmsg("Recevied Announce message from %" PRIx64 ", gm %" PRIx64 ", p1=%u p2=%u, src=%s, class=%u (%s), acc=0x%02X, logint=%" PRIi8,
     clock_id, announce.grandmasterIdentity, announce.grandmasterPriority1, announce.grandmasterPriority2, time_source_str, clock_class, clock_class_desc, clock_accuracy, logint);
 
 /*
@@ -580,7 +639,7 @@ announce_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, uni
 }
 
 static void
-pdelay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+pdelay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
   struct ptp_header header;
   struct ptp_pdelay_resp_message resp;
@@ -596,43 +655,94 @@ pdelay_msg_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, u
   ts = current_time_get();
   msg_pdelay_resp_make(&resp, daemon->clock_id, header.sequenceId, &header, ts);
 
-  port_set(peer_addr, PTP_EVENT_PORT);
+  port_set(peer_addr, daemon->event_svc.port);
   len = sendto(daemon->event_svc.fd, &resp, sizeof(resp), 0, &peer_addr->sa, peer_addr_len);
   if (len != sizeof(resp))
-    logmsg("Incomplete send of struct ptp_pdelay_resp_message\n");
+    airptp_logmsg("Incomplete send of struct ptp_pdelay_resp_message");
 
-  log_sent((uint8_t *)&resp, PTP_EVENT_PORT);
+  log_sent((uint8_t *)&resp, daemon->event_svc.port);
 
   ts = current_time_get();
   msg_pdelay_resp_follow_up_make(&followup, daemon->clock_id, header.sequenceId, &header, ts);
 
-  port_set(peer_addr, PTP_GENERAL_PORT);
+  port_set(peer_addr, daemon->general_svc.port);
   len = sendto(daemon->general_svc.fd, &followup, sizeof(followup), 0, &peer_addr->sa, peer_addr_len);
   if (len != sizeof(followup))
-    logmsg("Incomplete send of struct ptp_pdelay_resp_follow_up_message\n");
+    airptp_logmsg("Incomplete send of struct ptp_pdelay_resp_follow_up_message");
 
-  log_sent((uint8_t *)&followup, PTP_GENERAL_PORT);
+  log_sent((uint8_t *)&followup, daemon->general_svc.port);
 }
 
 static int
-tlv_handle_org_subtype_generic(const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
+tlv_handle_org_subtype_generic(struct airptp_daemon *daemon, const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
 {
-  logmsg("Received '%s' TLV org extension, subtype '%s', length %zu\n", org, subtype->name, len);
+  airptp_logmsg("Received '%s' TLV org extension, subtype '%s', length %zu", org, subtype->name, len);
   return 0;
 }
 
 static int
-tlv_handle_org_subtype_message_internal(const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
+tlv_handle_org_subtype_message_internal(struct airptp_daemon *daemon, const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
 {
   if (len < 6)
     return -1;
 
-  logmsg("Ignoring PTP signaling linkDelayInterval=%hhd, timeSyncInterval=%hhd, announceInterval=%hhd\n", data[0], data[1], data[2]);
+  airptp_logmsg("Ignoring PTP signaling linkDelayInterval=%hhd, timeSyncInterval=%hhd, announceInterval=%hhd", data[0], data[1], data[2]);
   return 0;
 }
 
 static int
-tlv_handle_org_extension(uint8_t *data, uint16_t len)
+tlv_handle_org_subtype_peer_add(struct airptp_daemon *daemon, const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
+{
+  uint32_t be32_peer_id;
+  uint8_t addr_len;
+  struct airptp_peer peer = { 0 };
+  uint8_t *ptr;
+
+  if (len < sizeof(be32_peer_id) + sizeof(addr_len))
+    goto error;
+
+  ptr = data;
+  memcpy(&be32_peer_id, ptr, sizeof(be32_peer_id));
+  ptr += sizeof(be32_peer_id);
+  memcpy(&addr_len, ptr, sizeof(addr_len));
+  ptr += sizeof(addr_len);
+
+  if (len < (ptr - data) + addr_len)
+    goto error;
+
+  memcpy(&peer.naddr, ptr, addr_len);
+  peer.id = be32toh(be32_peer_id);
+  peer.naddr_len = addr_len;
+
+  daemon_peer_add(daemon, &peer);
+  return 0;
+
+ error:
+  return -1;
+}
+
+static int
+tlv_handle_org_subtype_peer_del(struct airptp_daemon *daemon, const char *org, struct ptp_tlv_org_subtype_map *subtype, uint8_t *data, size_t len)
+{
+  uint32_t be32_peer_id;
+  struct airptp_peer peer = { 0 };
+
+  if (len < sizeof(be32_peer_id))
+    goto error;
+
+  memcpy(&be32_peer_id, data, sizeof(be32_peer_id));
+
+  peer.id = be32toh(be32_peer_id);
+
+  daemon_peer_del(daemon, &peer);
+  return 0;
+
+ error:
+  return -1;
+}
+
+static int
+tlv_handle_org_extension(struct airptp_daemon *daemon, uint8_t *data, uint16_t len)
 {
   uint8_t orgcode[PTP_TLV_ORG_CODE_SIZE];
   uint8_t subtype[PTP_TLV_ORG_CODE_SIZE];
@@ -657,7 +767,7 @@ tlv_handle_org_extension(uint8_t *data, uint16_t len)
 	  if (memcmp(subtype, org->subtypes[j].code, PTP_TLV_ORG_CODE_SIZE) != 0)
 	    continue;
 
-	  return org->subtypes[j].handler(org->name, &org->subtypes[j], data + offset, len - offset);
+	  return org->subtypes[j].handler(daemon, org->name, &org->subtypes[j], data + offset, len - offset);
 	}
     }
 
@@ -665,18 +775,18 @@ tlv_handle_org_extension(uint8_t *data, uint16_t len)
 }
 
 static int
-tlv_handle_path_trace(uint8_t *data, uint16_t len)
+tlv_handle_path_trace(struct airptp_daemon *daemon, uint8_t *data, uint16_t len)
 {
   // Normally we get the 8 byte clock ID here, log if something unexpected
   if (len != 8)
-    hexdump("TLV path trace with unexpected length", data, len);
+    airptp_hexdump("TLV path trace with unexpected length", data, len);
 
   return 0;
 }
 
 // Returns length of tlv consumed (0 if no tlv), negative if error
 static ssize_t
-tlv_handle(uint8_t *tlv, ssize_t tlv_max_size)
+tlv_handle(struct airptp_daemon *daemon, uint8_t *tlv, ssize_t tlv_max_size)
 {
   uint8_t *ptr = tlv;
   uint16_t be16;
@@ -701,9 +811,9 @@ tlv_handle(uint8_t *tlv, ssize_t tlv_max_size)
     return -1;
 
   if (type == PTP_TLV_ORG_EXTENSION)
-    ret = tlv_handle_org_extension(ptr, len);
+    ret = tlv_handle_org_extension(daemon, ptr, len);
   else if (type == PTP_TLV_PATH_TRACE)
-    ret = tlv_handle_path_trace(ptr, len);
+    ret = tlv_handle_path_trace(daemon, ptr, len);
   else
     ret = -1;
 
@@ -711,90 +821,122 @@ tlv_handle(uint8_t *tlv, ssize_t tlv_max_size)
 }
 
 static void
-signaling_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+signaling_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
   // 34 bytes header and then 10 bytes targetPortIdentity
   size_t tlv_offset = sizeof(struct ptp_header) + PTP_PORT_ID_SIZE;
   ssize_t req_remaining = req_len - tlv_offset;
   ssize_t tlv_size;
 
-  while ((tlv_size = tlv_handle(req + tlv_offset, req_remaining)) > 0)
+  while ((tlv_size = tlv_handle(daemon, req + tlv_offset, req_remaining)) > 0)
     {
       req_remaining -= tlv_size;
       tlv_offset += tlv_size;
     }
 
   if (tlv_size < 0)
-    hexdump("Received invalid or unknown PTP_MSGTYPE_SIGNALING", req, req_len);
+    airptp_hexdump("Received invalid or unknown PTP_MSGTYPE_SIGNALING", req, req_len);
 }
 
 static void
-management_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union net_sockaddr *peer_addr, socklen_t peer_addr_len)
+management_handle(struct airptp_daemon *daemon, uint8_t *req, ssize_t req_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addr_len)
 {
-  hexdump("Received PTP_MSGTYPE_MANAGEMENT", req, req_len);
+  airptp_hexdump("Received PTP_MSGTYPE_MANAGEMENT", req, req_len);
 }
 
 
 /* ============================= Message sending ============================ */
 
-static void
-slaves_msg_send(struct airptp_daemon *daemon, void *msg, size_t msg_len, struct airptp_service *svc)
+static int
+localhost_msg_send(void *msg, size_t msg_len, unsigned short port)
 {
-  struct airptp_slave *slave;
-  ssize_t len;
-  union net_sockaddr naddr;
-  uint8_t *msg_bin = msg;
+  struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_DGRAM };
+  struct addrinfo *info = NULL;
+  char strport[8];
+  int fd = -1;
+  ssize_t len = -1;
 
-  for (int i = 0; i < daemon->num_slaves; i++)
+  snprintf(strport, sizeof(strport), "%hu", port);
+  if (getaddrinfo("localhost", strport, &hints, &info) < 0)
+    goto error;
+
+  fd = socket(info->ai_family, SOCK_DGRAM, 0);
+  if (fd < 0)
+    goto error;
+
+  len = sendto(fd, msg, msg_len, 0, info->ai_addr, info->ai_addrlen);
+
+ error:
+  if (fd >= 0)
+    close(fd);
+  if (info)
+    freeaddrinfo(info);
+
+  return (len == msg_len) ? 0 : -1;
+}
+
+static void
+peers_msg_send(struct airptp_daemon *daemon, void *msg, size_t msg_len, struct airptp_service *svc)
+{
+  struct airptp_peer *peer;
+  ssize_t len;
+  union utils_net_sockaddr naddr;
+  uint8_t *msg_bin = msg;
+  uint64_t now = time(NULL);
+
+  for (int i = 0; i < daemon->num_peers; i++)
     {
-      slave = &daemon->slaves[i];
-      if (!slave->is_active)
+      peer = &daemon->peers[i];
+      if (peer->last_seen + AIRPTP_STALE_SECS < now)
+	peer->is_active = false; // Mark for removal
+
+      if (!peer->is_active)
 	continue;
 
       // Copy because we don't want to modify list elements
-      memcpy(&naddr, &slave->naddr, slave->naddr_len);
+      memcpy(&naddr, &peer->naddr, peer->naddr_len);
 
       port_set(&naddr, svc->port);
-      len = sendto(svc->fd, msg, msg_len, 0, &naddr.sa, slave->naddr_len);
+      len = sendto(svc->fd, msg, msg_len, 0, &naddr.sa, peer->naddr_len);
       if (len < 0)
 	{
-	  logmsg("Error sending PTP msg %02x to %s port %d\n", msg_bin[0], slave->str_addr, svc->port);
-	  slave->is_active = false; // Will be removed deferred by slaves_prune()
+	  airptp_logmsg("Error sending PTP msg %02x", msg_bin[0]);
+	  peer->is_active = false; // Will be removed deferred by peers_prune()
 	}
       else if (len != msg_len)
-	logmsg("Incomplete send of msg %02x to %s port %d\n", msg_bin[0], slave->str_addr, svc->port);
+	airptp_logmsg("Incomplete send of msg %02x", msg_bin[0]);
       else
 	log_sent(msg_bin, svc->port);
     }
 }
 
 void
-msg_announce_send(struct airptp_daemon *daemon)
+ptp_msg_announce_send(struct airptp_daemon *daemon)
 {
   struct ptp_announce_message annnounce;
   struct ptp_timestamp ts = { 0 };
 
   // iOS just sends 0 as originTimestamp, we do the same
   msg_announce_make(&annnounce, daemon->clock_id, daemon->announce_seq, ts);
-  slaves_msg_send(daemon, &annnounce, sizeof(annnounce), &daemon->general_svc);
+  peers_msg_send(daemon, &annnounce, sizeof(annnounce), &daemon->general_svc);
 
   daemon->announce_seq++;
 }
 
 void
-msg_signaling_send(struct airptp_daemon *daemon)
+ptp_msg_signaling_send(struct airptp_daemon *daemon)
 {
   struct ptp_signaling_message signaling;
 
   // TODO iOS sets targetPortIdentity, we probably also should
   msg_signaling_make(&signaling, daemon->clock_id, daemon->signaling_seq, NULL);
-  slaves_msg_send(daemon, &signaling, sizeof(signaling), &daemon->general_svc);
+  peers_msg_send(daemon, &signaling, sizeof(signaling), &daemon->general_svc);
 
   daemon->signaling_seq++;
 }
 
 void
-msg_sync_send(struct airptp_daemon *daemon)
+ptp_msg_sync_send(struct airptp_daemon *daemon)
 {
   struct ptp_sync_message sync;
   struct ptp_follow_up_message followup;
@@ -804,21 +946,38 @@ msg_sync_send(struct airptp_daemon *daemon)
   msg_sync_make(&sync, daemon->clock_id, daemon->sync_seq, ts);
   ts = current_time_get();
 
-  slaves_msg_send(daemon, &sync, sizeof(sync), &daemon->event_svc);
+  peers_msg_send(daemon, &sync, sizeof(sync), &daemon->event_svc);
 
   // Send Follow Up with precise timestamp after a small delay
   usleep(100);
   msg_sync_follow_up_make(&followup, daemon->clock_id, daemon->sync_seq, ts);
-  slaves_msg_send(daemon, &followup, sizeof(followup), &daemon->general_svc);
+  peers_msg_send(daemon, &followup, sizeof(followup), &daemon->general_svc);
 
   daemon->sync_seq++;
 }
 
+int
+ptp_msg_peer_add_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsigned short port)
+{
+  struct ptp_peer_signaling_message msg;
+
+  msg_peer_add_make(&msg, peer, hdl->clock_id);
+  return localhost_msg_send(&msg, sizeof(msg), port);
+}
+
+int
+ptp_msg_peer_del_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsigned short port)
+{
+  struct ptp_peer_signaling_message msg;
+
+  msg_peer_del_make(&msg, peer, hdl->clock_id);
+  return localhost_msg_send(&msg, sizeof(msg), port);
+}
 
 /* ============================= Message handler ============================ */
 
 void
-msg_handle(struct airptp_daemon *daemon, uint8_t *msg, size_t msg_len, union net_sockaddr *peer_addr, socklen_t peer_addrlen)
+ptp_msg_handle(struct airptp_daemon *daemon, uint8_t *msg, size_t msg_len, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen)
 {
   uint8_t msg_type = msg[0] & 0x0F; // Only lower bits are message type
 
@@ -846,23 +1005,28 @@ msg_handle(struct airptp_daemon *daemon, uint8_t *msg, size_t msg_len, union net
 	management_handle(daemon, msg, msg_len, peer_addr, peer_addrlen);
 	break;
       default:
-	hexdump("Received unhandled message", msg, msg_len);
+	airptp_hexdump("Received unhandled message", msg, msg_len);
 	return;
     }
 }
 
 int
-msg_handle_init(void)
+ptp_msg_handle_init(void)
 {
   int i;
+  int n;
 
   // Check alignment of enum and array indices
+  n = 0;
+  for (i = 0, n++; i < ARRAY_SIZE(ptp_tlv_apple_subtypes); i++)
+    assert(ptp_tlv_apple_subtypes[i].index == i);
+  for (i = 0, n++; i < ARRAY_SIZE(ptp_tlv_ieee_subtypes); i++)
+    assert(ptp_tlv_ieee_subtypes[i].index == i);
+  for (i = 0, n++; i < ARRAY_SIZE(ptp_tlv_own_subtypes); i++)
+    assert(ptp_tlv_own_subtypes[i].index == i);
   for (i = 0; i < ARRAY_SIZE(ptp_tlv_orgs); i++)
     assert(ptp_tlv_orgs[i].index == i);
-  for (i = 0; i < ARRAY_SIZE(ptp_tlv_apple_subtypes); i++)
-    assert(ptp_tlv_apple_subtypes[i].index == i);
-  for (i = 0; i < ARRAY_SIZE(ptp_tlv_ieee_subtypes); i++)
-    assert(ptp_tlv_ieee_subtypes[i].index == i);
+  assert(n == i);
 
   return 0;
 }

@@ -2,8 +2,8 @@
 #define __AIRPTP_PTP_STRUCTS_H__
 
 #define PTP_PORT_ID_SIZE 10
-#define PTP_EVENT_PORT 31900
-#define PTP_GENERAL_PORT 32000
+#define PTP_EVENT_PORT 319
+#define PTP_GENERAL_PORT 320
 
 enum ptp_msgtype
 {
@@ -150,6 +150,13 @@ struct ptp_signaling_message
   uint8_t tlv_apple2[36];
 } __attribute__((packed));
 
+// Message 0x0C - our internal variant
+struct ptp_peer_signaling_message
+{
+  struct ptp_header header;
+  uint8_t targetPortIdentity[PTP_PORT_ID_SIZE];
+  uint8_t tlv_peer_info[43]; // TLV_MIN_SIZE + 2 * PTP_TLV_ORG_CODE_SIZE + sizeof(uint32 + uint8 + sockaddr_in6)
+} __attribute__((packed));
 
 #define PTP_TLV_MIN_SIZE 4 // 2 bytes type + 2 bytes length
 #define PTP_TLV_ORG_CODE_SIZE 3
@@ -160,6 +167,7 @@ enum ptp_tlv_org
 {
   PTP_TLV_ORG_IEEE = 0,
   PTP_TLV_ORG_APPLE = 1,
+  PTP_TLV_ORG_OWN = 2,
 };
 
 enum ptp_tlv_org_ieee_subtype
@@ -175,12 +183,18 @@ enum ptp_tlv_org_apple_subtype
   PTP_TLV_ORG_APPLE_UNKNOWN5 = 2,
 };
 
+enum ptp_tlv_org_own_subtype
+{
+  PTP_TLV_ORG_OWN_PEER_ADD = 0,
+  PTP_TLV_ORG_OWN_PEER_DEL = 1,
+};
+
 struct ptp_tlv_org_subtype_map
 {
   int index;
   uint8_t code[PTP_TLV_ORG_CODE_SIZE];
   char *name;
-  int (*handler)(const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
+  int (*handler)(struct airptp_daemon *, const char *, struct ptp_tlv_org_subtype_map *, uint8_t *, size_t);
 };
 
 struct ptp_tlv_org_map

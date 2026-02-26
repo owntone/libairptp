@@ -35,7 +35,7 @@ SOFTWARE.
 #include <fcntl.h>
 
 #include "airptp_internal.h"
-#include "msg_handle.h"
+#include "ptp_msg_handle.h"
 
 #define DAEMON_INTERVAL_SECS_SHM_UPDATE 5
 
@@ -128,17 +128,170 @@ service_start(struct airptp_service *svc, event_callback_fn cb, struct airptp_da
 }
 
 
-/* ============================== Event handling ============================ */
+/* ------------------------------ Peer handling ----------------------------- */
+
+static void
+peer_clear(struct airptp_peer *peer)
+{
+  memset(peer, 0, sizeof(struct airptp_peer));
+}
+
+static void
+peers_prune(struct airptp_daemon *daemon)
+{
+  struct airptp_peer *peer;
+  int i;
+  int n_pruned;
+
+  for (i = 0, n_pruned = 0; i < daemon->num_peers; i++)
+    {
+      peer = &daemon->peers[i];
+      if (!peer->is_active)
+	{
+	  airptp_logmsg("Removing inactive peer with id %d", peer->id);
+	  peer_clear(peer);
+	  n_pruned++;
+	  continue;
+	}
+
+      if (n_pruned > 0)
+	daemon->peers[i - n_pruned] = *peer;
+    }
+
+  daemon->num_peers -= n_pruned;
+}
+
+static void
+peer_last_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen)
+{
+  int peer_family = peer_addr->sa.sa_family;
+  void *peer_sin_addr = &peer_addr->sin.sin_addr;
+  void *peer_sin6_addr = &peer_addr->sin6.sin6_addr;
+  int list_family;
+  void *list_sin_addr;
+  void *list_sin6_addr;
+  int cmp;
+  int i;
+
+  for (i = 0, cmp = 1; i < daemon->num_peers; i++)
+    {
+      list_family = daemon->peers[i].naddr.sa.sa_family;
+      list_sin_addr = &daemon->peers[i].naddr.sin.sin_addr;
+      list_sin6_addr = &daemon->peers[i].naddr.sin6.sin6_addr;
+
+      if (peer_family == AF_INET && list_family == AF_INET)
+	cmp = memcmp(peer_sin_addr, list_sin_addr, sizeof(struct in_addr));
+      else if (peer_family == AF_INET6 && list_family == AF_INET6)
+	cmp = memcmp(peer_sin6_addr, list_sin6_addr, sizeof(struct in6_addr));
+      else if (peer_family == AF_INET && IN6_IS_ADDR_V4MAPPED(list_sin6_addr))
+	cmp = memcmp(peer_sin_addr, list_sin6_addr + 12, sizeof(struct in_addr));
+      else if (list_family == AF_INET && IN6_IS_ADDR_V4MAPPED(peer_sin6_addr))
+	cmp = memcmp(list_sin_addr, peer_sin6_addr + 12, sizeof(struct in_addr));
+
+      if (cmp != 0)
+	continue;
+
+      daemon->peers[i].last_seen = time(NULL);
+      break;
+    }
+}
+
+static bool
+peer_exists(struct airptp_daemon *daemon, struct airptp_peer *peer)
+{
+  int i;
+
+  for (i = 0; i < daemon->num_peers; i++)
+    {
+      if (peer->id == daemon->peers[i].id)
+	return true;
+    }
+
+  return false;
+}
+
+int
+daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
+{
+  char straddr[64];
+
+  // Clean up dead peers
+  peers_prune(daemon);
+
+  utils_net_address_get(straddr, sizeof(straddr), &peer->naddr);
+
+  if (daemon->num_peers >= AIRPTP_MAX_PEERS) {
+    airptp_logmsg("Max number of PTP peers reached (num_peers %d), can't add %s", daemon->num_peers, straddr);
+    return -1;
+  }
+
+  if (peer_exists(daemon, peer)) {
+    airptp_logmsg("PTP peer %s already in list, num_peers %d", straddr, daemon->num_peers);
+    return -1;
+  }
+
+  peer->last_seen = time(NULL);
+  peer->is_active = true;
+  memcpy(&daemon->peers[daemon->num_peers], peer, sizeof(struct airptp_peer));
+  daemon->num_peers++;
+
+  // Trigger announce and signaling immediately
+  event_active(daemon->send_announce_timer, 0, 0);
+  event_active(daemon->send_signaling_timer, 0, 0);
+
+  // We should send sync's at specific interval, so if already running don't
+  // disturb the rhythm. I.e. only trigger if not running already.
+  if (!event_pending(daemon->send_sync_timer, EV_TIMEOUT, NULL))
+    event_add(daemon->send_sync_timer, &daemon_send_sync_tv);
+
+  airptp_logmsg("Added peer id %u, address %s, num_peers %d", peer->id, straddr, daemon->num_peers);
+  return 0;
+}
+
+int
+daemon_peer_del(struct airptp_daemon *daemon, struct airptp_peer *peer)
+{
+  uint32_t peer_id = peer->id;
+  bool found;
+  int i;
+
+  for (i = 0, found = false; i < daemon->num_peers; i++)
+    {
+      peer = &daemon->peers[i];
+      if (!found && (peer_id == peer->id))
+	{
+	  peer_clear(peer);
+	  found = true;
+	  continue;
+	}
+
+      // Make sure the list is sequential
+      if (found)
+	daemon->peers[i - 1] = *peer;
+    }
+
+  if (!found) {
+    airptp_logmsg("Can't remove PTP peer, not in our list");
+    return -1;
+  }
+
+  daemon->num_peers--;
+  airptp_logmsg("Removed peer id %u, num_peers %d", peer->id, daemon->num_peers);
+  return 0;
+}
+
+
+/* ------------------------------ Event handling ---------------------------- */
 
 static void
 send_announce_cb(int fd, short what, void *arg)
 {
   struct airptp_daemon *daemon = arg;
 
-  if (daemon->num_slaves == 0)
+  if (daemon->num_peers == 0)
     return; // Don't reschedule
 
-  msg_announce_send(daemon);
+  ptp_msg_announce_send(daemon);
 
   event_add(daemon->send_announce_timer, &daemon_send_announce_tv);
 }
@@ -148,10 +301,10 @@ send_signaling_cb(int fd, short what, void *arg)
 {
   struct airptp_daemon *daemon = arg;
 
-  if (daemon->num_slaves == 0)
+  if (daemon->num_peers == 0)
     return; // Don't reschedule
 
-  msg_signaling_send(daemon);
+  ptp_msg_signaling_send(daemon);
 
   event_add(daemon->send_signaling_timer, &daemon_send_signaling_tv);
 }
@@ -161,10 +314,10 @@ send_sync_cb(int fd, short what, void *arg)
 {
   struct airptp_daemon *daemon = arg;
 
-  if (daemon->num_slaves == 0)
+  if (daemon->num_peers == 0)
     return; // Don't reschedule
 
-  msg_sync_send(daemon);
+  ptp_msg_sync_send(daemon);
 
   event_add(daemon->send_sync_timer, &daemon_send_sync_tv);
 }
@@ -174,7 +327,7 @@ incoming_cb(int fd, short what, void *arg)
 {
   struct airptp_daemon *daemon = arg;
   const char *svc_name = (fd == daemon->event_svc.fd) ? "PTP EVENT" : "PTP GENERAL";
-  union net_sockaddr peer_addr;
+  union utils_net_sockaddr peer_addr;
   socklen_t peer_addrlen = sizeof(peer_addr);
   uint8_t req[1024];
   ssize_t len;
@@ -187,11 +340,13 @@ incoming_cb(int fd, short what, void *arg)
   if (len <= 0 || peer_addr.sa.sa_family == AF_UNSPEC)
     {
       if (len < 0)
-	logmsg("Service %s read error: %s\n", svc_name, strerror(errno));
+	airptp_logmsg("Service %s read error: %s", svc_name, strerror(errno));
       return;
     }
 
-  msg_handle(daemon, req, len, &peer_addr, peer_addrlen);
+  peer_last_seen_update(daemon, &peer_addr, peer_addrlen);
+
+  ptp_msg_handle(daemon, req, len, &peer_addr, peer_addrlen);
 }
 
 static void
@@ -205,18 +360,31 @@ shm_update_cb(int fd, short what, void *arg)
 }
 
 static void
-exit_cb(int fd, short what, void *arg)
+daemon_start_signal(struct airptp_daemon *daemon)
+{
+  pthread_mutex_lock(&daemon->lock);
+  daemon->is_running = true;
+  pthread_cond_signal(&daemon->cond);
+  pthread_mutex_unlock(&daemon->lock);
+}
+
+static void
+start_stop_cb(int fd, short what, void *arg)
 {
   struct airptp_daemon *daemon = arg;
   char buf[1];
-  int ret;
 
-  ret = read(fd, buf, 1);
-  if (ret < 0)
-    logmsg("Unexpected error from exit_cb read");
+  if (what != EV_READ) {
+    airptp_logmsg("Starting airptp event loop");
+    daemon_start_signal(daemon);
+    event_add(daemon->start_stop_ev, NULL);
+  } else {
+    airptp_logmsg("Stopping airptp event loop");
+    if (read(fd, buf, 1) < 0)
+      airptp_logmsg("Unexpected error from start_stop_cb read");
 
-  event_base_loopbreak(daemon->evbase);
-  daemon->is_running = false;
+    event_base_loopbreak(daemon->evbase);
+  }
 }
 
 
@@ -228,11 +396,12 @@ static void *
 run(void *arg)
 {
   struct airptp_daemon *daemon = arg;
+  struct timeval now = { 0 };
   int shm_fd = -1;
   int ret;
 
-  if (daemon->cb && daemon->cb->thread_name_set)
-    daemon->cb->thread_name_set("libairptp");
+  airptp_callbacks_register(&daemon->cb);
+  airptp_thread_name_set("libairptp");
 
   ret = service_start(&daemon->event_svc, incoming_cb, daemon);
   if (ret < 0)
@@ -242,15 +411,10 @@ run(void *arg)
   if (ret < 0)
     goto stop;
 
-  daemon->exit_ev = event_new(daemon->evbase, daemon->exit_pipe[0], EV_READ | EV_PERSIST, exit_cb, daemon);
-  if (!daemon->exit_ev)
+  daemon->start_stop_ev = event_new(daemon->evbase, daemon->exit_pipe[0], EV_READ, start_stop_cb, daemon);
+  if (!daemon->start_stop_ev)
     goto stop;
-  event_add(daemon->exit_ev, NULL);
-
-  daemon->shm_update_timer = evtimer_new(daemon->evbase, shm_update_cb, daemon);
-  if (!daemon->shm_update_timer)
-    goto stop;
-  event_add(daemon->shm_update_timer, &daemon_shm_update_tv);
+  event_add(daemon->start_stop_ev, &now);
 
   daemon->send_announce_timer = evtimer_new(daemon->evbase, send_announce_cb, daemon);
   daemon->send_signaling_timer = evtimer_new(daemon->evbase, send_signaling_cb, daemon);
@@ -262,14 +426,20 @@ run(void *arg)
     shm_fd = daemon_shm_create(&daemon->info, daemon->clock_id);
     if (shm_fd < 0)
       goto stop;
+
+    daemon->shm_update_timer = evtimer_new(daemon->evbase, shm_update_cb, daemon);
+    if (!daemon->shm_update_timer)
+      goto stop;
+    event_add(daemon->shm_update_timer, &daemon_shm_update_tv);
   }
 
   event_base_dispatch(daemon->evbase);
 
-  if (daemon->is_running)
-    logmsg("Event loop terminated ahead of time");
-
  stop:
+  if (!daemon->is_running) {
+    airptp_logmsg("PTP main loop failed to start");
+    daemon_start_signal(daemon); // Unblock daemon_start() if waiting
+  }
   daemon_shm_destroy(daemon->info, shm_fd);
   if (daemon->send_announce_timer)
     event_free(daemon->send_announce_timer);
@@ -277,25 +447,27 @@ run(void *arg)
     event_free(daemon->send_signaling_timer);
   if (daemon->send_sync_timer)
     event_free(daemon->send_sync_timer);
-  if (daemon->exit_ev)
-    event_free(daemon->exit_ev);
+  if (daemon->start_stop_ev)
+    event_free(daemon->start_stop_ev);
   service_stop(&daemon->general_svc);
   service_stop(&daemon->event_svc);
+  daemon->is_running = false;
   pthread_exit(NULL);
 }
 
-int
-daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, struct airptp_callbacks *cb)
+enum airptp_error
+daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, struct airptp_callbacks cb)
 {
   int ret;
 
-  ret = msg_handle_init();
+  ret = ptp_msg_handle_init();
   if (ret < 0)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Message handler failed to initialize");
 
+  // TODO necessary to support pipe2()?
   ret = pipe(daemon->exit_pipe);
   if (ret < 0)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Couldn't create daemon exit pipe");
 
   evutil_make_socket_nonblocking(daemon->exit_pipe[0]);
   evutil_make_socket_nonblocking(daemon->exit_pipe[1]);
@@ -305,42 +477,48 @@ daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, st
   daemon->clock_id = clock_id;
   daemon->cb = cb;
 
+  pthread_mutex_init(&daemon->lock, NULL);
+  pthread_cond_init(&daemon->cond, NULL);
+
   daemon->evbase = event_base_new();
   if (!daemon->evbase)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_OOM, "Out of memory");
 
   ret = pthread_create(&daemon->tid, NULL, run, daemon);
   if (ret < 0)
-    goto error;
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Error creating daemon thread");
 
-  daemon->is_running = true;
+  pthread_mutex_lock(&daemon->lock);
+  while (!daemon->is_running)
+    pthread_cond_wait(&daemon->cond, &daemon->lock);
+  pthread_mutex_unlock(&daemon->lock);
 
-  return 0;
+  return AIRPTP_OK;
 
  error:
   if (daemon->evbase)
     event_base_free(daemon->evbase);
-  return -1;
+  return ret;
 }
 
-void
+enum airptp_error
 daemon_stop(struct airptp_daemon *daemon)
 {
   char byte = 1;
-  int ret;
+  int ret = AIRPTP_OK;
 
   if (!daemon->is_running)
-    goto cleanup;
+    RETURN_ERROR(AIRPTP_ERR_INVALID, "Stop requested but daemon not running");
 
   ret = write(daemon->exit_pipe[1], &byte, 1);
   if (ret < 0)
-    logmsg("Unexpected return value from daemon_stop() write");
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Error writing to exit pipe");
 
   ret = pthread_join(daemon->tid, NULL);
   if (ret != 0)
-    logmsg("Could not join ptpd thread: %s\n", strerror(errno));
+    RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Error joining daemon thread");
 
- cleanup:
+ error:
   event_base_free(daemon->evbase);
 
   // These were opened by airptp_daemon_bind()
@@ -348,4 +526,6 @@ daemon_stop(struct airptp_daemon *daemon)
     close(daemon->event_svc.fd);
   if (daemon->general_svc.fd >= 0)
     close(daemon->general_svc.fd);
+
+  return ret;
 }

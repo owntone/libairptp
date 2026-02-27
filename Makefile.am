@@ -1,4 +1,4 @@
-SUBDIRS = tests
+SUBDIRS = tests daemon
 
 noinst_LIBRARIES = libairptp.a
 

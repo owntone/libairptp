@@ -29,6 +29,7 @@ SOFTWARE.
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
@@ -38,9 +39,9 @@ SOFTWARE.
 #include <sys/wait.h>
 #include <signal.h>
 #include <limits.h>
-#include <grp.h>
 #include <stdint.h>
 #include <getopt.h>
+#include <syslog.h>
 
 #include <event2/event.h>
 #include <event2/thread.h>
@@ -58,8 +59,7 @@ struct event_base *evbase_main;
 
 static struct event *sig_event;
 static int main_exit;
-
-// TODO In background mode, log via syslog or the likes of it
+static bool run_background = true;
 
 static void
 version(void)
@@ -75,7 +75,32 @@ usage(char *program)
   printf("Usage: %s [options]\n\n", program);
   printf("Options:\n");
   printf("  -f              Run in foreground\n");
-  printf("  -v              Display version information\n");
+  printf("  -v              Increase verbosity\n");
+  printf("  -V              Display version information\n");
+  printf("\n");
+}
+
+static void
+logerror(const char *fmt, ...)
+{
+  va_list ap;
+
+  va_start(ap, fmt);
+  if (run_background)
+    vsyslog(LOG_ERR, fmt, ap);
+  else
+    vfprintf(stderr, fmt, ap);
+  va_end(ap);
+}
+
+static void
+logmsg(const char *fmt, ...) {
+  va_list ap;
+
+  va_start(ap, fmt);
+  vprintf(fmt, ap);
+  va_end(ap);
+
   printf("\n");
 }
 
@@ -88,7 +113,7 @@ daemonize(void)
 
   fd = open("/dev/null", O_RDWR, 0);
   if (fd < 0) {
-    printf("Error opening /dev/null: %s\n", strerror(errno));
+    logerror("Error opening /dev/null: %s\n", strerror(errno));
     goto error;
   }
 
@@ -101,13 +126,13 @@ daemonize(void)
   if (childpid > 0)
     exit(EXIT_SUCCESS);
   else if (childpid < 0) {
-    printf("Fork failed: %s\n", strerror(errno));
+    logerror("Fork failed: %s\n", strerror(errno));
     goto error;
   }
 
   pid_ret = setsid();
   if (pid_ret == (pid_t) -1) {
-    printf("setsid() failed: %s\n", strerror(errno));
+    logerror("setsid() failed: %s\n", strerror(errno));
     goto error;
   }
 
@@ -138,19 +163,18 @@ signal_signalfd_cb(int fd, short event, void *arg)
       switch (info.ssi_signo)
 	{
 	  case SIGCHLD:
-	    printf("Got SIGCHLD\n");
+	    logerror("Got SIGCHLD\n");
 	    while (waitpid(-1, &status, WNOHANG) > 0)
 	      /* Nothing. */ ;
 	    break;
 
 	  case SIGINT:
 	  case SIGTERM:
-	    printf("Got SIGTERM or SIGINT\n");
+	    logerror("Got SIGTERM or SIGINT\n");
 	    main_exit = 1;
 	    break;
 
 	  case SIGHUP:
-	    printf("Got SIGHUP\n");
 	    break;
 	}
     }
@@ -178,19 +202,18 @@ signal_kqueue_cb(int fd, short event, void *arg)
       switch (ke.ident)
 	{
 	  case SIGCHLD:
-	    printf("Got SIGCHLD\n");
+	    logerror("Got SIGCHLD\n");
 	    while (waitpid(-1, &status, WNOHANG) > 0)
 	      /* Nothing. */ ;
 	    break;
 
 	  case SIGINT:
 	  case SIGTERM:
-	    printf("Got SIGTERM or SIGINT\n");
+	    logerror("Got SIGTERM or SIGINT\n");
 	    main_exit = 1;
 	    break;
 
 	  case SIGHUP:
-	    printf("Got SIGHUP\n");
 	    break;
 	}
     }
@@ -206,8 +229,9 @@ int
 main(int argc, char **argv)
 {
   struct airptp_handle *ptpd_hdl = NULL;
-  bool background = true;
+  struct airptp_callbacks logs_cb = { .logmsg = logmsg, };
   int option;
+  bool be_verbose;
   sigset_t sigs;
   int sigfd;
 #ifdef HAVE_KQUEUE
@@ -217,20 +241,25 @@ main(int argc, char **argv)
 
   struct option option_map[] = {
     { "foreground",    0, NULL, 'f' },
-    { "version",       0, NULL, 'v' },
+    { "version",       0, NULL, 'V' },
+    { "verbose",       0, NULL, 'v' },
 
     { NULL,            0, NULL, 0   }
   };
 
-  while ((option = getopt_long(argc, argv, "fv", option_map, NULL)) != -1)
+  while ((option = getopt_long(argc, argv, "fvV", option_map, NULL)) != -1)
     {
       switch (option)
 	{
 	  case 'f':
-	    background = false;
+	    run_background = false;
 	    break;
 
 	  case 'v':
+	    be_verbose = true;
+	    break;
+
+	  case 'V':
 	    version();
 	    return EXIT_SUCCESS;
 	    break;
@@ -242,15 +271,21 @@ main(int argc, char **argv)
 	}
     }
 
+  if (run_background) {
+    openlog(PACKAGE_NAME, 0, LOG_DAEMON);
+  } else if (be_verbose) {
+    airptp_callbacks_register(&logs_cb);
+  }
+
   ptpd_hdl = airptp_daemon_bind();
   if (!ptpd_hdl) {
-    printf("Error binding: %s\n", airptp_errmsg_get());
+    logerror("Error binding: %s\n", airptp_errmsg_get());
     goto error;
   }
 
   ret = airptp_daemon_start(ptpd_hdl, 0xdeadbeef, true);
   if (ret < 0) {
-    printf("Error starting daemon: %s\n", airptp_errmsg_get());
+    logerror("Error starting daemon: %s\n", airptp_errmsg_get());
     goto error;
   }
 
@@ -263,25 +298,25 @@ main(int argc, char **argv)
   sigaddset(&sigs, SIGPIPE);
   ret = pthread_sigmask(SIG_BLOCK, &sigs, NULL);
   if (ret != 0) {
-    printf("Error setting signal set\n");
+    logerror("Error setting signal set\n");
     goto error;
   }
 
-  ret = background ? daemonize() : 0;
+  ret = run_background ? daemonize() : 0;
   if (ret < 0) {
-    printf("Could not daemonize server\n");
+    logerror("Could not daemonize server\n");
     goto error;
   }
 
   evbase_main = event_base_new();
   if (!evbase_main) {
-    printf("Error creating event base\n");
+    logerror("Error creating event base\n");
     goto error;
   }
 
   ret = evthread_use_pthreads();
   if (ret < 0) {
-    printf("libevent is missing support for pthreads\n");
+    logerror("libevent is missing support for pthreads\n");
     goto error;
   }
 
@@ -289,7 +324,7 @@ main(int argc, char **argv)
   /* Set up signal fd */
   sigfd = signalfd(-1, &sigs, SFD_NONBLOCK | SFD_CLOEXEC);
   if (sigfd < 0) {
-    printf("Could not setup signalfd: %s\n", strerror(errno));
+    logerror("Could not setup signalfd: %s\n", strerror(errno));
     goto error;
   }
 
@@ -297,7 +332,7 @@ main(int argc, char **argv)
 #else
   sigfd = kqueue();
   if (sigfd < 0) {
-    printf("Could not setup kqueue: %s\n", strerror(errno));
+    logerror("Could not setup kqueue: %s\n", strerror(errno));
     goto error;
   }
 
@@ -308,14 +343,14 @@ main(int argc, char **argv)
 
   ret = kevent(sigfd, ke_sigs, 4, NULL, 0, NULL);
   if (ret < 0) {
-    printf("Could not register signal events: %s\n", strerror(errno));
+    logerror("Could not register signal events: %s\n", strerror(errno));
     goto error;
   }
 
   sig_event = event_new(evbase_main, sigfd, EV_READ, signal_kqueue_cb, NULL);
 #endif
   if (!sig_event) {
-    printf("Could not create signal event\n");
+    logerror("Could not create signal event\n");
 
     ret = EXIT_FAILURE;
     goto error;
@@ -329,12 +364,15 @@ main(int argc, char **argv)
 
   event_base_free(evbase_main);
   airptp_end(ptpd_hdl);
+  if (run_background)
+    closelog();
   return EXIT_SUCCESS;
 
  error:
   if (evbase_main)
     event_base_free(evbase_main);
-
   airptp_end(ptpd_hdl);
+  if (run_background)
+    closelog();
   return EXIT_FAILURE;
 }

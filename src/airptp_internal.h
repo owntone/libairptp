@@ -47,7 +47,6 @@ enum airptp_error
   AIRPTP_ERR_INTERNAL = -5,
 };
 
-// TODO maybe not needed
 enum airptp_state
 {
   AIRPTP_STATE_NONE = 0,

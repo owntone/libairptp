@@ -31,7 +31,7 @@ SOFTWARE.
 
 // For shm_open
 #include <sys/mman.h>
-#include <sys/stat.h>        /* For mode constants */
+#include <sys/stat.h>
 #include <fcntl.h>
 
 #include "airptp_internal.h"
@@ -509,7 +509,6 @@ daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, st
   if (ret < 0)
     RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Message handler failed to initialize");
 
-  // TODO necessary to support pipe2()?
   ret = pipe(daemon->exit_pipe);
   if (ret < 0)
     RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Couldn't create daemon exit pipe");

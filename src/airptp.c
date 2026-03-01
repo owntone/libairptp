@@ -250,6 +250,9 @@ airptp_peer_remove(uint32_t peer_id, struct airptp_handle *hdl)
 {
   struct airptp_peer peer = { 0 };
 
+  if (hdl->state != AIRPTP_STATE_RUNNING)
+    return;
+
   peer.id = peer_id;
 
   ptp_msg_peer_del_send(&peer, hdl, airptp_general_port);

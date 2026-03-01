@@ -94,7 +94,8 @@ logerror(const char *fmt, ...)
 }
 
 static void
-logmsg(const char *fmt, ...) {
+logmsg(const char *fmt, ...)
+{
   va_list ap;
 
   va_start(ap, fmt);
@@ -158,26 +159,24 @@ signal_signalfd_cb(int fd, short event, void *arg)
   struct signalfd_siginfo info;
   int status;
 
-  while (read(fd, &info, sizeof(struct signalfd_siginfo)) == sizeof(struct signalfd_siginfo))
-    {
-      switch (info.ssi_signo)
-	{
-	  case SIGCHLD:
-	    logerror("Got SIGCHLD\n");
-	    while (waitpid(-1, &status, WNOHANG) > 0)
-	      /* Nothing. */ ;
-	    break;
+  while (read(fd, &info, sizeof(struct signalfd_siginfo)) == sizeof(struct signalfd_siginfo)) {
+    switch (info.ssi_signo) {
+      case SIGCHLD:
+        logerror("Got SIGCHLD\n");
+        while (waitpid(-1, &status, WNOHANG) > 0)
+          /* Nothing. */ ;
+        break;
 
-	  case SIGINT:
-	  case SIGTERM:
-	    logerror("Got SIGTERM or SIGINT\n");
-	    main_exit = 1;
-	    break;
+      case SIGINT:
+      case SIGTERM:
+        logerror("Got SIGTERM or SIGINT\n");
+        main_exit = 1;
+        break;
 
-	  case SIGHUP:
-	    break;
-	}
+      case SIGHUP:
+        break;
     }
+  }
 
   if (main_exit)
     event_base_loopbreak(evbase_main);
@@ -197,26 +196,24 @@ signal_kqueue_cb(int fd, short event, void *arg)
   ts.tv_sec = 0;
   ts.tv_nsec = 0;
 
-  while (kevent(fd, NULL, 0, &ke, 1, &ts) > 0)
-    {
-      switch (ke.ident)
-	{
-	  case SIGCHLD:
-	    logerror("Got SIGCHLD\n");
-	    while (waitpid(-1, &status, WNOHANG) > 0)
-	      /* Nothing. */ ;
-	    break;
+  while (kevent(fd, NULL, 0, &ke, 1, &ts) > 0) {
+    switch (ke.ident) {
+      case SIGCHLD:
+        logerror("Got SIGCHLD\n");
+        while (waitpid(-1, &status, WNOHANG) > 0)
+          /* Nothing. */ ;
+        break;
 
-	  case SIGINT:
-	  case SIGTERM:
-	    logerror("Got SIGTERM or SIGINT\n");
-	    main_exit = 1;
-	    break;
+      case SIGINT:
+      case SIGTERM:
+        logerror("Got SIGTERM or SIGINT\n");
+        main_exit = 1;
+        break;
 
-	  case SIGHUP:
-	    break;
-	}
+      case SIGHUP:
+        break;
     }
+  }
 
   if (main_exit)
     event_base_loopbreak(evbase_main);
@@ -247,29 +244,27 @@ main(int argc, char **argv)
     { NULL,            0, NULL, 0   }
   };
 
-  while ((option = getopt_long(argc, argv, "fvV", option_map, NULL)) != -1)
-    {
-      switch (option)
-	{
-	  case 'f':
-	    run_background = false;
-	    break;
+  while ((option = getopt_long(argc, argv, "fvV", option_map, NULL)) != -1) {
+    switch (option) {
+      case 'f':
+        run_background = false;
+        break;
 
-	  case 'v':
-	    be_verbose = true;
-	    break;
+      case 'v':
+        be_verbose = true;
+        break;
 
-	  case 'V':
-	    version();
-	    return EXIT_SUCCESS;
-	    break;
+      case 'V':
+        version();
+        return EXIT_SUCCESS;
+        break;
 
-	  default:
-	    usage(argv[0]);
-	    return EXIT_FAILURE;
-	    break;
-	}
+      default:
+        usage(argv[0]);
+        return EXIT_FAILURE;
+        break;
     }
+  }
 
   if (run_background) {
     openlog(PACKAGE_NAME, 0, LOG_DAEMON);

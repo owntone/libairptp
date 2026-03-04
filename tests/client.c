@@ -65,7 +65,6 @@ main(int argc, char * argv[])
   int ret;
 
   airptp_callbacks_register(&cb);
-  airptp_ports_override(30319, 30320);
 
   hdl = airptp_daemon_find();
   if (!hdl)

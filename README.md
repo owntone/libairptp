@@ -34,6 +34,25 @@ To run airptpd in foreground and verbose:
 sudo ./daemon/airptpd -f -v
 ```
 
+## Check if working
+
+To check if the daemon is working, build with:
+
+```
+./configure --enable-daemon --enable-tests && make && make check
+```
+
+Then run airptpd in foreground as described above, and in another terminal run
+`./tests/client`.
+
 ## Installing
 
-(TODO systemd service files)
+Installing on systemd systems:
+
+```
+./configure --enable-daemon --enable-install-systemd && make
+sudo make install
+```
+
+Start with `systemctl start airptpd` and check the status with
+`systemctl status airptpd`.

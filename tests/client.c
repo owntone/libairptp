@@ -78,7 +78,8 @@ main(int argc, char * argv[])
   printf("client.c found clock_id=%" PRIx64 "\n", clock_id);
 
   uint32_t peer_id;
-  ret = airptp_peer_add(&peer_id, "192.168.1.10", hdl);
+//  ret = airptp_peer_add(&peer_id, "192.168.1.10", hdl);
+  ret = airptp_peer_add(&peer_id, "fe80::521e:2dff:fe51:419%eth0", hdl);
   if (ret < 0)
     goto error;
 

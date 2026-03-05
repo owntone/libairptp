@@ -113,23 +113,24 @@ utils_net_bind(const char *node, unsigned short port)
 int
 utils_net_sockaddr_get(union utils_net_sockaddr *naddr, const char *addr, unsigned short port)
 {
-  memset(naddr, 0, sizeof(union utils_net_sockaddr));
+  struct addrinfo hints = { 0 };
+  struct addrinfo *servinfo;
+  char strport[8];
+  int ret;
 
-  if (inet_pton(AF_INET, addr, &naddr->sin.sin_addr) == 1)
-    {
-      naddr->sin.sin_family = AF_INET;
-      naddr->sin.sin_port = htons(port);
-      return 0;
-    }
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_DGRAM;
 
-  if (inet_pton(AF_INET6, addr, &naddr->sin6.sin6_addr) == 1)
-    {
-      naddr->sin6.sin6_family = AF_INET6;
-      naddr->sin6.sin6_port = htons(port);
-      return 0;
-    }
+  snprintf(strport, sizeof(strport), "%hu", port);
+  ret = getaddrinfo(addr, strport, &hints, &servinfo);
+  if (ret < 0)
+    goto error;
 
-  return -1;
+  memcpy(naddr, servinfo->ai_addr, servinfo->ai_addrlen);
+
+ error:
+  freeaddrinfo(servinfo);
+  return (ret < 0) ? -1 : 0;
 }
 
 int

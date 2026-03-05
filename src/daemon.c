@@ -222,6 +222,7 @@ int
 daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
 {
   char straddr[64];
+  uint32_t scope_id;
 
   // Clean up dead peers
   peers_prune(daemon);
@@ -252,7 +253,8 @@ daemon_peer_add(struct airptp_daemon *daemon, struct airptp_peer *peer)
   if (!event_pending(daemon->send_sync_timer, EV_TIMEOUT, NULL))
     event_add(daemon->send_sync_timer, &daemon_send_sync_tv);
 
-  airptp_logmsg("Added peer id %u, address %s, num_peers %d", peer->id, straddr, daemon->num_peers);
+  scope_id = (peer->naddr.sa.sa_family == AF_INET6) ? peer->naddr.sin6.sin6_scope_id : 0;
+  airptp_logmsg("Added peer id %u, address %s, scope id %u, num_peers %d", peer->id, straddr, scope_id, daemon->num_peers);
   return 0;
 }
 
@@ -284,7 +286,7 @@ daemon_peer_del(struct airptp_daemon *daemon, struct airptp_peer *peer)
   }
 
   daemon->num_peers--;
-  airptp_logmsg("Removed peer id %u, num_peers %d", peer->id, daemon->num_peers);
+  airptp_logmsg("Removed peer id %u, num_peers %d", peer_id, daemon->num_peers);
   return 0;
 }
 

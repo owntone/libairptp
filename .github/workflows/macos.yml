@@ -33,4 +33,4 @@ jobs:
 
     - name: Test run
       run: |
-        sudo ./airptpd -f -v
+        sudo ./daemon/airptpd -f -v

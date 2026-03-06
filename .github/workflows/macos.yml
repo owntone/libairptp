@@ -1,0 +1,34 @@
+name: macOS
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build tools
+      run: brew install automake autoconf libtool pkg-config gettext
+
+    - name: Install other dependencies
+      run: |
+        brew install libevent
+
+    - name: Configure
+      run: |
+        autoreconf -fi
+        ./configure --enable-daemon --enable-tests
+
+    - name: Build
+      run: |
+        make
+        make check
+
+    - name: Test run
+      run: |
+        sudo ./airptpd -f -v

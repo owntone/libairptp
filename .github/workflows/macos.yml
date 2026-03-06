@@ -21,6 +21,8 @@ jobs:
 
     - name: Configure
       run: |
+        export CFLAGS="-I$(brew --prefix)/include"
+        export LDFLAGS="-L$(brew --prefix)/lib"
         autoreconf -fi
         ./configure --enable-daemon --enable-tests
 

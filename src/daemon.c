@@ -172,36 +172,14 @@ peers_prune(struct airptp_daemon *daemon)
 static void
 peer_last_seen_update(struct airptp_daemon *daemon, union utils_net_sockaddr *peer_addr, socklen_t peer_addrlen)
 {
-  int peer_family = peer_addr->sa.sa_family;
-  struct in_addr *peer_sin_addr = &peer_addr->sin.sin_addr;
-  struct in6_addr *peer_sin6_addr = &peer_addr->sin6.sin6_addr;
-  int list_family;
-  struct in_addr *list_sin_addr;
-  struct in6_addr *list_sin6_addr;
-  int cmp;
   int i;
 
-  for (i = 0, cmp = 1; i < daemon->num_peers; i++)
-    {
-      list_family = daemon->peers[i].naddr.sa.sa_family;
-      list_sin_addr = &daemon->peers[i].naddr.sin.sin_addr;
-      list_sin6_addr = &daemon->peers[i].naddr.sin6.sin6_addr;
-
-      if (peer_family == AF_INET && list_family == AF_INET)
-	cmp = memcmp(peer_sin_addr, list_sin_addr, sizeof(struct in_addr));
-      else if (peer_family == AF_INET6 && list_family == AF_INET6)
-	cmp = memcmp(peer_sin6_addr, list_sin6_addr, sizeof(struct in6_addr));
-      else if (peer_family == AF_INET && IN6_IS_ADDR_V4MAPPED(list_sin6_addr))
-	cmp = memcmp(peer_sin_addr, ((uint8_t *)list_sin6_addr) + 12, sizeof(struct in_addr));
-      else if (list_family == AF_INET && IN6_IS_ADDR_V4MAPPED(peer_sin6_addr))
-	cmp = memcmp(list_sin_addr, ((uint8_t *)peer_sin6_addr) + 12, sizeof(struct in_addr));
-
-      if (cmp != 0)
-	continue;
-
+  for (i = 0; i < daemon->num_peers; i++) {
+    if (utils_net_address_is_same(peer_addr, &daemon->peers[i].naddr)) {
       daemon->peers[i].last_seen = time(NULL);
       break;
     }
+  }
 }
 
 static bool
@@ -209,11 +187,10 @@ peer_exists(struct airptp_daemon *daemon, struct airptp_peer *peer)
 {
   int i;
 
-  for (i = 0; i < daemon->num_peers; i++)
-    {
-      if (peer->id == daemon->peers[i].id)
-	return true;
-    }
+  for (i = 0; i < daemon->num_peers; i++) {
+    if (peer->id == daemon->peers[i].id)
+      return true;
+  }
 
   return false;
 }

@@ -151,6 +151,31 @@ utils_net_address_get(char *addr, size_t addr_len, union utils_net_sockaddr *nad
   return 0;
 }
 
+bool
+utils_net_address_is_same(union utils_net_sockaddr *a, union utils_net_sockaddr *b)
+{
+  int a_family = a->sa.sa_family;
+  int b_family = b->sa.sa_family;
+  struct in_addr *a_sin_addr = &a->sin.sin_addr;
+  struct in_addr *b_sin_addr = &b->sin.sin_addr;
+  struct in6_addr *a_sin6_addr = &a->sin6.sin6_addr;
+  struct in6_addr *b_sin6_addr = &b->sin6.sin6_addr;
+  int cmp;
+
+  if (a_family == AF_INET && b_family == AF_INET)
+    cmp = memcmp(a_sin_addr, b_sin_addr, sizeof(struct in_addr));
+  else if (a_family == AF_INET6 && b_family == AF_INET6)
+    cmp = memcmp(a_sin6_addr, b_sin6_addr, sizeof(struct in6_addr));
+  else if (a_family == AF_INET && IN6_IS_ADDR_V4MAPPED(b_sin6_addr))
+    cmp = memcmp(a_sin_addr, ((uint8_t *)b_sin6_addr) + 12, sizeof(struct in_addr));
+  else if (b_family == AF_INET && IN6_IS_ADDR_V4MAPPED(a_sin6_addr))
+    cmp = memcmp(b_sin_addr, ((uint8_t *)a_sin6_addr) + 12, sizeof(struct in_addr));
+  else
+    cmp = 1;
+
+  return (cmp == 0);
+}
+
 uint32_t
 utils_djb_hash(const void *data, size_t len)
 {

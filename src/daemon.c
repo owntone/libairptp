@@ -44,6 +44,7 @@ struct daemon_start_result
 {
   enum airptp_error retval;
   const char *errmsg;
+  struct airptp_daemon_info daemon_info;
 };
 
 static struct timeval daemon_send_announce_tv =
@@ -68,19 +69,32 @@ static struct timeval daemon_shm_update_tv =
 };
 
 static void
-daemon_shm_destroy(struct airptp_shm_struct *shm, int fd)
+daemon_info_fill(struct airptp_daemon_info *info, uint64_t clock_id, struct airptp_service *event_svc, struct airptp_service *general_svc)
+{
+  info->version_major = AIRPTP_SHM_STRUCTS_VERSION_MAJOR;
+  info->version_minor = AIRPTP_SHM_STRUCTS_VERSION_MINOR;
+  info->clock_id = clock_id;
+  info->ts = time(NULL);
+  info->event_port = event_svc->port;
+  info->general_port = general_svc->port;
+  info->ipv4_enabled = (event_svc->socket.fd4 >= 0 && general_svc->socket.fd4 >= 0);
+  info->ipv6_enabled = (event_svc->socket.fd6 >= 0 && general_svc->socket.fd6 >= 0);
+}
+
+static void
+daemon_shm_destroy(struct airptp_daemon_info *shm, int fd)
 {
   if (shm != MAP_FAILED)
-    munmap(shm, sizeof(struct airptp_shm_struct));
+    munmap(shm, sizeof(struct airptp_daemon_info));
   if (fd >= 0)
     close(fd);
   shm_unlink(AIRPTP_SHM_NAME);
 }
 
 static int
-daemon_shm_create(struct airptp_shm_struct **shm, uint64_t clock_id, struct airptp_service *event_svc, struct airptp_service *general_svc)
+daemon_shm_create(struct airptp_daemon_info **shm, uint64_t clock_id, struct airptp_service *event_svc, struct airptp_service *general_svc)
 {
-  struct airptp_shm_struct *info = MAP_FAILED;
+  struct airptp_daemon_info *info = MAP_FAILED;
   int fd;
   int ret;
 
@@ -90,22 +104,15 @@ daemon_shm_create(struct airptp_shm_struct **shm, uint64_t clock_id, struct airp
   if (fd < 0)
     goto error;
 
-  ret = ftruncate(fd, sizeof(struct airptp_shm_struct));
+  ret = ftruncate(fd, sizeof(struct airptp_daemon_info));
   if (ret < 0)
     goto error;
 
-  info = mmap(NULL, sizeof(struct airptp_shm_struct), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  info = mmap(NULL, sizeof(struct airptp_daemon_info), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   if (info == MAP_FAILED)
     goto error;
 
-  info->version_major = AIRPTP_SHM_STRUCTS_VERSION_MAJOR;
-  info->version_minor = AIRPTP_SHM_STRUCTS_VERSION_MINOR;
-  info->clock_id = clock_id;
-  info->ts = time(NULL);
-  info->event_port = event_svc->port;
-  info->general_port = general_svc->port;
-  info->ipv4_enabled = (event_svc->socket.fd4 >= 0 && general_svc->socket.fd4 >= 0);
-  info->ipv6_enabled = (event_svc->socket.fd6 >= 0 && general_svc->socket.fd6 >= 0);
+  daemon_info_fill(info, clock_id, event_svc, general_svc);
 
   *shm = info;
 
@@ -366,10 +373,13 @@ shm_update_cb(int fd, short what, void *arg)
 
 // Daemon thread
 static void
-loop_start_signal(enum airptp_error retval, const char *errmsg, int start_fd)
+loop_start_signal(enum airptp_error retval, const char *errmsg, int start_fd, struct airptp_daemon_info *info)
 {
   struct daemon_start_result start_result = { .retval = retval, .errmsg = errmsg };
   int ret;
+
+  if (info)
+    memcpy(&start_result.daemon_info, info, sizeof(struct airptp_daemon_info));
 
   ret = write(start_fd, &start_result, sizeof(start_result));
   if (ret != sizeof(start_result))
@@ -378,7 +388,7 @@ loop_start_signal(enum airptp_error retval, const char *errmsg, int start_fd)
 
 // Parent thread
 static enum airptp_error
-loop_start_wait(const char **errmsg, int start_fd)
+loop_start_wait(const char **errmsg, int start_fd, struct airptp_daemon_info *info)
 {
   struct daemon_start_result start_result;
   int ret;
@@ -388,6 +398,8 @@ loop_start_wait(const char **errmsg, int start_fd)
     start_result.retval = AIRPTP_ERR_INTERNAL;
     start_result.errmsg = "Error reading thread start result";
   }
+
+  memcpy(info, &start_result.daemon_info, sizeof(struct airptp_daemon_info));
 
   *errmsg = start_result.errmsg;
   return start_result.retval;
@@ -401,7 +413,7 @@ start_stop_cb(int fd, short what, void *arg)
 
   if (what != EV_READ) {
     airptp_logmsg("Starting airptp event loop");
-    loop_start_signal(AIRPTP_OK, NULL, daemon->start_pipe[1]);
+    loop_start_signal(AIRPTP_OK, NULL, daemon->start_pipe[1], daemon->info);
     event_add(daemon->start_stop_ev, NULL);
   } else {
     airptp_logmsg("Stopping airptp event loop");
@@ -421,6 +433,7 @@ static void *
 run(void *arg)
 {
   struct airptp_daemon *daemon = arg;
+  struct airptp_daemon_info info = { 0 };
   struct timeval now = { 0 };
   int shm_fd = -1;
   int ret;
@@ -456,6 +469,9 @@ run(void *arg)
     if (!daemon->shm_update_timer)
       RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Error creating shared memory update timer");
     event_add(daemon->shm_update_timer, &daemon_shm_update_tv);
+  } else {
+    daemon_info_fill(&info, daemon->clock_id, &daemon->event_svc, &daemon->general_svc);
+    daemon->info = &info;
   }
 
   event_base_dispatch(daemon->evbase);
@@ -471,13 +487,14 @@ run(void *arg)
     event_free(daemon->send_sync_timer);
   if (daemon->start_stop_ev)
     event_free(daemon->start_stop_ev);
-  daemon_shm_destroy(daemon->info, shm_fd);
+  if (daemon->is_shared)
+    daemon_shm_destroy(daemon->info, shm_fd);
   service_stop(&daemon->general_svc);
   service_stop(&daemon->event_svc);
 
   // Initialization error before event loop dispatch, tell our parent
   if (ret != 0)
-    loop_start_signal(ret, airptp_errmsg, daemon->start_pipe[1]);
+    loop_start_signal(ret, airptp_errmsg, daemon->start_pipe[1], NULL);
 
   pthread_exit(NULL);
 }
@@ -498,7 +515,7 @@ daemon_cleanup(struct airptp_daemon *daemon)
 }
 
 enum airptp_error
-daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, struct airptp_callbacks cb)
+daemon_start(struct airptp_daemon *daemon, struct airptp_daemon_info *info, bool is_shared, uint64_t clock_id, struct airptp_callbacks cb)
 {
   int ret;
 
@@ -530,7 +547,7 @@ daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, st
   if (ret < 0)
     RETURN_ERROR(AIRPTP_ERR_INTERNAL, "Error spawning daemon thread");
 
-  ret = loop_start_wait(&airptp_errmsg, daemon->start_pipe[0]);
+  ret = loop_start_wait(&airptp_errmsg, daemon->start_pipe[0], info);
   if (ret < 0)
     RETURN_ERROR(ret, airptp_errmsg);
 

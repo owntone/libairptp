@@ -162,9 +162,7 @@ airptp_daemon_start(struct airptp_handle *hdl, uint64_t clock_id_seed, bool is_s
   // If we had the MAC address at this point we, could make a valid EUI-48 based
   // clocked from mac[0..2] + 0xFFFE + mac[3..5]. However, since we don't, we
   // create a non-EUI-64 clock ID from 0xFFFF + 6 byte seed, ref 7.5.2.2.3.
-  hdl->clock_id = clock_id_seed | 0xFFFF000000000000;
-
-  ret = daemon_start(&hdl->daemon, is_shared, hdl->clock_id, airptp_cb);
+  ret = daemon_start(&hdl->daemon, &hdl->daemon_info, is_shared, clock_id_seed | 0xFFFF000000000000, airptp_cb);
   if (ret < 0)
     goto error; // errmsg set by daemon_start
 
@@ -180,7 +178,7 @@ struct airptp_handle *
 airptp_daemon_find(void)
 {
   struct airptp_handle *hdl = NULL;
-  struct airptp_shm_struct *daemon_info = MAP_FAILED;
+  struct airptp_daemon_info *daemon_info = MAP_FAILED;
   time_t now;
   int fd = -1;
   int ret __attribute__((unused));
@@ -189,7 +187,7 @@ airptp_daemon_find(void)
   if (fd < 0)
     RETURN_ERROR(AIRPTP_ERR_NOTFOUND, "No airptp daemon found");
 
-  daemon_info = mmap(NULL, sizeof(struct airptp_shm_struct), PROT_READ, MAP_SHARED, fd, 0);
+  daemon_info = mmap(NULL, sizeof(struct airptp_daemon_info), PROT_READ, MAP_SHARED, fd, 0);
   if (daemon_info == MAP_FAILED)
     RETURN_ERROR(AIRPTP_ERR_INTERNAL, "mmap() of shared memory returned an error");
 
@@ -206,9 +204,9 @@ airptp_daemon_find(void)
 
   hdl->state = AIRPTP_STATE_RUNNING;
   hdl->is_daemon = false;
-  memcpy(&hdl->daemon_info, daemon_info, sizeof(struct airptp_shm_struct));
+  memcpy(&hdl->daemon_info, daemon_info, sizeof(struct airptp_daemon_info));
 
-  munmap(daemon_info, sizeof(struct airptp_shm_struct));
+  munmap(daemon_info, sizeof(struct airptp_daemon_info));
   close(fd);
 
   airptp_event_port = hdl->daemon_info.event_port;
@@ -219,7 +217,7 @@ airptp_daemon_find(void)
  error:
   free(hdl);
   if (daemon_info != MAP_FAILED)
-    munmap(daemon_info, sizeof(struct airptp_shm_struct));
+    munmap(daemon_info, sizeof(struct airptp_daemon_info));
   if (fd >= 0)
     close(fd);
   return NULL;
@@ -297,7 +295,7 @@ airptp_clock_id_get(uint64_t *clock_id, struct airptp_handle *hdl)
   if (hdl->state != AIRPTP_STATE_RUNNING)
     return -1;
 
-  *clock_id = hdl->clock_id;
+  *clock_id = hdl->daemon_info.clock_id;
   return 0;
 }
 

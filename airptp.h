@@ -3,6 +3,16 @@
 
 #include <inttypes.h>
 
+/* libairptp supports three modes of operation:
+ * - Running a shared, standalone ptp daemon. In this case you will bind the ptp
+ *   ports with airptp_daemon_bind() and then start with airptp_daemon_start()
+ *   where is_shared is true.
+ * - Running a private ptp daemon. You still bind and start (with is_shared
+ *   false), but other processes using libairptpd won't be able to find it.
+ * - As a library facilitating making requests to a ptp daemon, shared or
+ *   private.
+ */
+
 struct airptp_handle;
 
 struct airptp_callbacks

@@ -958,7 +958,7 @@ ptp_msg_peer_add_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsig
 {
   struct ptp_peer_signaling_message msg;
 
-  msg_peer_add_make(&msg, peer, hdl->clock_id);
+  msg_peer_add_make(&msg, peer, hdl->daemon_info.clock_id);
   return localhost_msg_send(&msg, sizeof(msg), port);
 }
 
@@ -967,7 +967,7 @@ ptp_msg_peer_del_send(struct airptp_peer *peer, struct airptp_handle *hdl, unsig
 {
   struct ptp_peer_signaling_message msg;
 
-  msg_peer_del_make(&msg, peer, hdl->clock_id);
+  msg_peer_del_make(&msg, peer, hdl->daemon_info.clock_id);
   return localhost_msg_send(&msg, sizeof(msg), port);
 }
 

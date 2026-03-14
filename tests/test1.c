@@ -69,12 +69,12 @@ main(int argc, char * argv[])
 
   hdl = airptp_daemon_find();
   if (!hdl) {
-    printf("test1.c no running daemon found, will make one\n");
+    printf("test1.c no running daemon found, will make a private one\n");
     hdl = airptp_daemon_bind();
     if (!hdl)
       goto error;
 
-    ret = airptp_daemon_start(hdl, 1, true);
+    ret = airptp_daemon_start(hdl, 1, false);
     if (ret < 0)
       goto error;
   }

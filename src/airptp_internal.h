@@ -5,7 +5,7 @@
 #include <pthread.h>
 #include <inttypes.h>
 
-#include "airptp.h"
+#include "../airptp.h"
 #include "utils.h"
 
 #define AIRPTP_SHM_NAME "/airptp_shm"
@@ -54,7 +54,7 @@ enum airptp_state
   AIRPTP_STATE_RUNNING,
 };
 
-struct airptp_shm_struct
+struct airptp_daemon_info
 {
   uint16_t version_major;
   uint16_t version_minor;
@@ -86,7 +86,7 @@ struct airptp_peer
 struct airptp_daemon
 {
   bool is_shared;
-  struct airptp_shm_struct *info; // mmap
+  struct airptp_daemon_info *info;
 
   uint64_t clock_id;
 
@@ -124,9 +124,7 @@ struct airptp_handle
 
   struct airptp_daemon daemon;
 
-  struct airptp_shm_struct daemon_info;
-
-  uint64_t clock_id;
+  struct airptp_daemon_info daemon_info;
 };
 
 void

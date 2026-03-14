@@ -8,7 +8,7 @@ int
 daemon_peer_del(struct airptp_daemon *daemon, struct airptp_peer *peer);
 
 enum airptp_error
-daemon_start(struct airptp_daemon *daemon, bool is_shared, uint64_t clock_id, struct airptp_callbacks cb);
+daemon_start(struct airptp_daemon *daemon, struct airptp_daemon_info *info, bool is_shared, uint64_t clock_id, struct airptp_callbacks cb);
 
 enum airptp_error
 daemon_stop(struct airptp_daemon *daemon);
